@@ -1,32 +1,735 @@
-# Prerequisites
-*.d
+/* 
+Program modelu auta projektu autonomně řízená autodráha. 
+Tento program umožňuje modelu auta projet jakkoliv sestavenou autodráhu v teoreticky 
+nejnižším možném čase. Program je rozdělen do měřící a provozní sekvence. 
+V měřící sekvenci si model naměří potřebná data a určí počet kol autodráhy. 
+V provozní sekvenci se těmito hodnotami bude následně řídit a zpřesňovat je. 
+Hodnoty času jsou proměnnými znázorněny v jednotkách setin sekund.
+*/
+// připojení knihoven
+#include <SoftwareSerial.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+#include <Arduino.h>
+Adafruit_MPU6050 mpu;
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+// definování výstupních pinů pro Bluetooth komunikaci
+#define RX 7
+#define TX 8
+// definování maximálních odchylek pro porovnávání časů zatáček
+#define por 17
+#define porm -17
 
-# Precompiled Headers
-*.gch
-*.pch
+// inicializace Bluetooth modulu z knihovny SoftwareSerial
+SoftwareSerial bluetooth(TX, RX);
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
+// inicializace proměnných
+int8_t value; // proměnná pro počítání zatáček
+int8_t st1,st2,st3,st4,st5,st6,st7,speedtime; // proměnné pro čas vysoké rychlosti
+int8_t slow; // hodnota nízké rychlosti
+int8_t speed; // hodnota rozjížděcí rychlosti
+int8_t turns; // proměnná udávající počet zatáček autodráhy
+int8_t status1; // hodnota určující typ sekvence
+int8_t value3; // proměnná proti opakování podmínky při regulaci rychlosti v provozní sekvenci
+int8_t rounds; // proměnná pro počet kol při provozní sekvenci
+int8_t timer1; // časovač zatáček provozní sekvence
+int8_t value2; // proměnná proti opakování některých podmínek
+bool status; // proměnná udávající směr zatáčky
+bool inside; // proměnná udávající typ kolejnice autodráhy (vnitřní/vnější)
+int16_t z1,z2,z3,z4,z5,z6,z7,z8,z9,z10,z11,z12,z13,z14; // proměnné pro časy zatáček
+int16_t r1,r2,r3,r4,r5,r6,r7; // proměnné pro časy rovinek
+int16_t timer_t,t1,t2,t3,t4,t5,t6,t7; // proměnné nižších časů průměrných časů vysokých rychlostí rovinek pro zpřesňování časů vysokých rychlostí rovinek
+int16_t timer_p,p1,p2,p3,p4,p5,p6,p7; // proměnné navýšených časů průměrných časů vysokých rychlostí rovinek pro zpřesňování časů vysokých rychlostí rovinek
+int16_t sum; // proměnná pro porovnávání časů zatáček kvůli 
+int16_t timer; // proměnná časovače
 
-# Fortran module files
-*.mod
-*.smod
+ISR(TIMER1_COMPA_vect)
+// funkce Interrupt Service Routine 
+{
+  timer = timer + 1; // Přičtení časovače za každé 0,01 s. Hodnota časovače 100 == 1 s.
+}
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+void setup() {
+// inicializace sériové komunikace a nastavení hodnoty proměnných
+bluetooth.begin(9600);
+Serial.begin(9600);
+value = -8; 
+value2 = 0;
+z1 = 500;
+slow = 0;
+turns = 0;
+status1 = 1;
+speed = 69;
+value3 = false;
+Serial.begin(9600);
+pinMode(6, OUTPUT);
+pinMode(9, OUTPUT);
+digitalWrite(9, HIGH);
+mpu.begin();
+mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  noInterrupts();
+  // Configurace Timer 1 interrupt
+  // F_clock = 16e6 Hz, předdělička = 64, Fs = 100 Hz
+  TCCR1A = 0;
+  TCCR1B = 1<<WGM12 | 0<<CS12 | 1<<CS11 | 1<<CS10;
+  TCNT1 = 0;          // resetovat časovač Timer 1 
+  // OCR1A = ((F_clock / předdělička) / Fs) - 1 = 2499
+  OCR1A = 2499;       // Nastavit vzorkovací frekvenci Fs = 100 Hz
+  TIMSK1 = 1<<OCIE1A; // spustit Timer 1 interrupt
 
-# Executables
-*.exe
-*.out
-*.app
+// Neinvertovaná PWM na OC0A bez předděličky
+  TCCR0A = (1 << COM0A1) | (1<<WGM01) | (1<<WGM00);
+// PWM perioda = 4 ms
+  TCCR0B = (1 << CS02);
+  OCR0A = speed;
+  // spustit všechny interrupty
+  interrupts();
+delay(200);
+}
+
+void loop() {
+  // inicializace dat gyroskopu
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  // podmínka měřící sekvence - počátek měřící sekvence.
+  if (status1 == 1){
+   // podmínka detekce zatáčky
+   if (abs(g.gyro.z) >= 1.5 && value2 == 0){ 
+    value2 = 1;
+    value ++;
+    // přiřazení zpřesňovacích hodnot pro časy vysokých rychlostí rovinek a přiřazení časů vysokých rychlostí rovinek
+    // tyto časy byly zjištěný na základě předchozího měření
+    if (timer >= 14 && timer < 31){ // podmínka pro zjištění délky rovinky - podmínka pro jednodílnou rovinku
+      if(inside == false){ // zjištění typu zatáčky předcházející rovince - podmínka pro vnější kolej zatáčky
+      timer_t = 27; // vyšší hodnota zpřesňovacího času
+      timer_p = 24; // nižší hodnota zpřesňovacího času
+      speedtime = 9; // čas vysoké rychlosti rovinky
+      }
+      if(inside == true){ // zjištění typu zatáčky předcházející rovince - podmínka pro vnitřní kolej zatáčky
+      timer_t = 23;
+      timer_p = 20;
+      speedtime = 10;
+      }
+    }
+    if (timer >= 31 && timer < 60){ // podmínka pro zjištění délky rovinky - podmínka pro dvojdílnou rovinku
+      if(inside == false){
+      timer_t = 49;
+      timer_p = 45;
+      speedtime = 18;
+      }
+      if(inside == true){
+      timer_t = 45;
+      timer_p = 41;
+      speedtime = 18;
+      }
+    }
+    if (timer >= 60 && timer < 86){ // podmínka pro zjištění délky rovinky - podmínka pro trojdílnou rovinku
+      if(inside == false){
+      timer_t = 71;
+      timer_p = 68;
+      speedtime = 21;
+      }
+      if(inside == true){
+      timer_t = 61;
+      timer_p = 58;
+      speedtime = 23;
+      }
+    }
+    if (timer >= 86 && timer < 120){ // podmínka pro zjištění délky rovinky - podmínka pro čtyřdílnou rovinku
+      if(inside == false){
+      timer_t = 85;
+      timer_p = 82;
+      speedtime = 28;
+      }
+      if(inside == true){
+      timer_t = 79;
+      timer_p = 76;
+      speedtime = 31;
+      }
+    }
+
+    // zápis přiřazených a naměřených hodnot do přidružených proměnných
+    switch(value){
+    case 1:
+        r1 = timer;
+        t1 = timer_t;
+        p1 = timer_p;
+        st1 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r1);
+        break;
+    case 2:
+        r2 = timer;
+        t2 = timer_t;
+        p2 = timer_p;
+        st2 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r2);
+        break;
+    case 3:
+        r3 = timer;
+        t3 = timer_t;
+        p3 = timer_p;
+        st3 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r3);
+        break;
+    case 4:
+        r4 = timer;
+        t4 = timer_t;
+        p4 = timer_p;
+        st4 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r4);
+        break;
+    case 5:
+        r5 = timer;
+        t5 = timer_t;
+        p5 = timer_p;
+        st5 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r5);
+        break;
+    case 6:
+        r6 = timer;
+        t6 = timer_t;
+        p6 = timer_p;
+        st6 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r6);
+        break;
+    case 7:
+        r7 = timer;
+        t7 = timer_t;
+        p7 = timer_p;
+        st7 = speedtime;
+        bluetooth.print("rovinka: ");
+        bluetooth.println(r7);
+        break;
+    }
+    // konec rozjížděcí rychlosti, počátek měřící rychlosti
+    if (value == -2){
+      OCR0A = 65;
+    }
+    
+    timer = 0; // vynulování časovače
+    // určení směru zatáčky
+    if (g.gyro.z < 0)
+    {
+      status = false;
+    }
+    else
+    {
+      status = true;
+    }
+   }
+    // podmínka pro konec zatáčky
+    if (abs(g.gyro.z) < 1.5 && value2 == 1){
+    value2 = 3;
+    timer1 = timer + timer1;
+    timer = 0;
+   }
+
+   // podmínka pro pokračování počítání časovače v případě výchylky gyroskopických dat během zatáčky 
+   if (abs(g.gyro.z) >= 1.5 && value2 == 3 && timer < 20){
+    value2 = 1;
+   }
+   // podmínka pro potvrzení konce zatáčky
+   if (timer >= 20 && value2 == 3){
+    value2 = 0; 
+    // podmínka pro zjištění typu kolejnice zatáčky podle jejího času
+    if (timer1 > 16 && timer1 < 27){
+      inside = true;
+    }
+    if (timer1 >= 27 && timer1 < 41){
+      inside = false;
+    }
+    if (timer1 >= 41 && timer1 < 56){
+      inside = true;
+    }
+    if (timer1 >= 56 && timer1 < 70){
+      inside = false;
+    }
+    if (timer1 > 70 && timer1 < 88){
+      inside = true;
+    }
+    if (timer1 >= 88 && timer1 < 112){
+      inside = false;
+    }
+    if (timer1 >= 112 && timer1 < 132){
+      inside = true;
+    }
+    if (timer1 >= 132 && timer1 < 150){
+      inside = false;
+    }
+    // výpis bluetooth zpětné vazby
+    bluetooth.print("value: ");
+    bluetooth.print(value);
+    bluetooth.print("inside: ");
+    bluetooth.println(inside);
+
+   // zapisování časů zatáček do přidružených proměnných
+   switch(value){
+    case 1:
+        z1 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z1);
+        break;
+    case 2:
+        z2 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z2);
+        break;
+    case 3:
+        z3 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z3);
+        break;
+    case 4:
+        z4 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z4);
+        break;
+    case 5:
+        z5 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z5);
+        break;
+    case 6:
+        z6 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z6);
+        break;
+    case 7:
+        z7 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z7);
+        break;
+    case 8:
+        z8 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z8);
+        break;
+    case 9:
+        z9 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z9);
+        break;
+    case 10:
+        z10 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z10);
+        break;
+    case 11:
+        z11 = timer1;
+        bluetooth.print("zatáčka: ");
+        bluetooth.println(z11);
+        break;
+    case 12:
+        z12 = timer1;
+        bluetooth.println(z12);
+        break;
+    case 13:
+        z13 = timer1;
+        bluetooth.println(z13);
+        break;
+    case 14:
+        z14 = timer1;
+        bluetooth.println(z14);
+        break;
+   }
+
+    // vynulování časovačů
+    timer1 = 0;
+    timer = 0;
+   }
+
+// porovnávání časů zatáček za účelem zjištění počtu zatáček sestaveného modelu autodráhy
+sum = (z1 - z2);
+if ((sum > porm) && (sum < por)){ // Podmínka projde pokud se bude 1. a 2. naměřená zatáčka rovnat. Povolená odchylka je 0,17 s.
+  sum = (z1 - z3);
+  if ((sum > porm) && (sum < por)){ // Podmínka projde pokud se bude 1. a 3. naměřená zatáčka rovnat. Povolená odchylka je 0,17 s.
+    sum = (z1 - z4);
+    if ((sum > porm) && (sum < por)){ // Podmínka projde pokud se bude 1. a 4. naměřená zatáčka rovnat. Povolená odchylka je 0,17 s.
+      sum = (z1 - z5);
+      if ((sum > porm) && (sum < por)){ // Podmínka projde pokud se bude 1. a 5. naměřená zatáčka rovnat. Povolená odchylka je 0,17 s.
+        sum = (z1 - z6);
+        if ((sum > porm) && (sum < por)){ // Podmínka projde pokud se bude 1. a 6. naměřená zatáčka rovnat. Povolená odchylka je 0,17 s.
+          sum = (z1 - z7);
+          if ((sum > porm) && (sum < por) && turns == 0){ // Podmínka projde pokud se bude 1. a 7. naměřená zatáčka rovnat a počet zatáček nebude dříve určený. Povolená odchylka je 0,17 s.
+          bluetooth.println("opakování");
+          turns = 6; /*  Všechny zatáčky autodráhy jsou totožné, proto se bude cyklus opakovat po potenciálně možném projetí nejdelší autodráhy 
+          se všemi zatáčkami stejnými. Takováto autodráha může mít maximálně 6 zatáček. Toto zajištuje, že každá rovinka autodráhy bude mít svoji proměnnou 
+          a nebudou všechny zatáčky zapsány v jedné proměnné.  */   
+
+          }
+        }
+      }
+    }
+  }
+}
+sum = (z1 - z4);
+if ((sum > porm) && (sum < por)){
+  sum = (z2 - z5);
+  if ((sum > porm) && (sum < por)){
+    sum = (z3 - z6);
+    if ((sum > porm) && (sum < por)){
+      sum = (z4 - z7);
+      if ((sum > porm) && (sum < por)){
+        sum = (z5 - z8);
+        if ((sum > porm) && (sum < por)){
+          sum = (z6 - z9);
+          if ((sum > porm) && (sum < por)){
+            sum = (z7 - z10);
+            if ((sum > porm) && (sum < por)){
+              if (value == 12 && turns == 0){
+              bluetooth.println("3 zatáčky");
+              turns = 3;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+sum = (z1 - z5);
+if ((sum > porm) && (sum < por)){
+  sum = (z2 - z6);
+  if ((sum > porm) && (sum < por)){
+    sum = (z3 - z7);
+    if ((sum > porm) && (sum < por)){
+      sum = (z4 - z8);
+      if ((sum > porm) && (sum < por)){
+        sum = (z5 - z9);
+        if ((sum > porm) && (sum < por)){
+          sum = (z6 - z10);
+          if ((sum > porm) && (sum < por)){
+            sum = (z7 - z11);
+            if ((sum > porm) && (sum < por)){
+              if (value == 12 && turns == 0){
+              bluetooth.println("4 zatáčky");
+              turns = 4;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+sum = (z1 - z6);
+if ((sum > porm) && (sum < por)){
+  sum = (z2 - z7);
+  if ((sum > porm) && (sum < por)){
+    sum = (z3 - z8);
+    if ((sum > porm) && (sum < por)){
+      sum = (z4 - z9);
+      if ((sum > porm) && (sum < por)){
+        sum = (z5 - z10);
+        if ((sum > porm) && (sum < por)){
+          sum = (z6 - z11);
+          if ((sum > porm) && (sum < por)){
+            sum = (z7 - z12);
+            if ((sum > porm) && (sum < por)){
+              if (value == 15 && turns == 0){
+              bluetooth.println("5 zatáčky");
+              turns = 5;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+sum = (z1 - z7);
+if ((sum > porm) && (sum < por)){
+  sum = (z2 - z8);
+  if ((sum > porm) && (sum < por)){
+    sum = (z3 - z9);
+    if ((sum > porm) && (sum < por)){
+      sum = (z4 - z10);
+      if ((sum > porm) && (sum < por)){
+        sum = (z5 - z11);
+        if ((sum > porm) && (sum < por)){
+          sum = (z6 - z12);
+          if ((sum > porm) && (sum < por)){
+            sum = (z7 - z13);
+            if ((sum > porm) && (sum < por)){
+              if (value == 18 && turns == 0){
+              bluetooth.println("6 zatáčky");
+              turns = 6;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+sum = (z1 - z8);
+if ((sum > porm) && (sum < por)){
+  sum = (z2 - z9);
+  if ((sum > porm) && (sum < por)){
+    sum = (z3 - z10);
+    if ((sum > porm) && (sum < por)){
+      sum = (z4 - z11);
+      if ((sum > porm) && (sum < por)){
+        sum = (z5 - z12);
+        if ((sum > porm) && (sum < por)){
+          sum = (z6 - z13);
+          if ((sum > porm) && (sum < por)){
+            sum = (z7 - z14);
+            if ((sum > porm) && (sum < por)){
+              if (value == 14 && turns == 0){
+              bluetooth.println("7 zatáčky");
+              turns = 7;
+              value2 = true;
+              }
+            }
+          }
+        }
+      }
+    }
+   }
+  }
+
+  // pormínka pro změnu sekvence na provozní
+  if (turns > 0){
+    status1 = 2;
+    value = 0;
+    OCR0A = 71;
+    value2 = false;
+  }
+  // podmínka pro zjištění chyby při měřící sekvenci a opakování této sekvence
+  if (value > 18){
+    bluetooth.print("opakování měřící sekvence");
+    value = 0;
+  }
+  }
+
+  // podmínka provozní sekvence
+  if (status1 == 2){
+  if (abs(g.gyro.z) >= 1.6 && value2 == false && timer >= 20){ // podmínky pro detekci začátku zatáčky
+   value2 = true; 
+   OCR0A = 71;
+   value3 = 0;
+   // bluetooth zpětná vazba
+   bluetooth.print("timer ");
+   bluetooth.print(timer);
+   bluetooth.print("value = ");
+   bluetooth.println(value);
+
+  // podmínky prozpřesňování časů vysokých rychlostí
+  switch(value){
+    case 1:
+        if(timer < p1 && value3 == 0){
+          st1 = st1 - 1;
+          value3 = 2;
+        }
+        if(timer > t1 && value3 == 0){
+          st1++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 2:
+        if(timer < p2 && value3 == 0){
+          st2 = st2 - 1;
+          value3 = 2;
+        }
+        if(timer > t2 && value3 == 0){
+          st2++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 3:
+        if(timer < p3 && value3 == 0){
+          st3 = st3 - 1;
+          value3 = 2;
+        }
+        if(timer > t3 && value3 == 0){
+          st3++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 4:
+        if(timer < p4 && value3 == 0){
+          st4 = st4 - 1;
+          value3 = 2;
+        }
+        if(timer > t4 && value3 == 0){
+          st4++;
+          OCR0A = 71;
+          value3 = 2;;
+        }
+        break;
+    case 5:
+        if(timer < p5 && value3 == 0){
+          st5 = st5 - 1;
+          value3 = 2;
+        }
+        if(timer > t5 && value3 == 0){
+          st5++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 6:
+        if(timer < p6 && value3 == 0){
+          st6 = st6 - 1;
+          value3 = 2;
+        }
+        if(timer > t6 && value3 == 0){
+          st6++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 7:
+        if(timer < p7 && value3 == 0){
+          st7 = st7 - 1;
+          value3 = 2;
+        }
+        if(timer > t7 && value3 == 0){
+          st7++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    }
+    timer = 0; // vynulování časovače
+   }
+  if (abs(g.gyro.z) < 1.6 && value2 == true && timer >= 25){ // podmínky pro detekci začátku
+  value2 = false; 
+  OCR0A = 255; // nastavení maximální rychlosti
+  value ++;
+
+  // podmínka pro resetování počtu projetých zatáček na konci kola autodráhy
+  if (value > turns){
+  value = 1;
+  }
+
+  timer = 0;
+  value3 = 1;
+  }
+
+  // podmínky a příkazy pro regulaci rychlosti
+  switch(value){
+    case 1:
+        // podmínka pro přesáhnutí časovače čas vysoké rychlosti
+        if (timer >= st1 && value3 == 1){
+        bluetooth.print("speed ");
+        bluetooth.println(st1);
+        OCR0A = slow; // snížení příkonu motoru na brzdnou rychlost
+        value3 = 0;
+        }
+        break;
+    case 2:
+        if (timer >= st2 && value3 == 1){
+        bluetooth.print("speed ");
+        bluetooth.println(st2);
+        OCR0A = slow;
+        value3 = 0;
+        }
+        break;
+    case 3:
+        if (timer >= st3 && value3 == 1){
+        bluetooth.print("speed ");
+        bluetooth.println(st3);
+        OCR0A = slow;
+        value3 = 0;
+        }
+        break;
+    case 4:
+        if (timer >= st4 && value3 == 1){
+        bluetooth.print("speed ");
+        bluetooth.println(st4);
+        OCR0A = slow;
+        value3 = 0;
+        }
+        break;
+    case 5:
+        if (timer >= st5 && value3 == 1){
+        bluetooth.print("speed ");
+        bluetooth.println(st5);
+        OCR0A = slow;
+        value3 = 0;
+        }
+        break;
+    case 6:
+        if (timer >= st6 && value3 == 1){
+        OCR0A = slow;
+        value3 = 0;
+        }
+        break;
+    case 7:
+        if (timer >= st7 && value3 == 1){
+        OCR0A = slow;
+        value3 = 0;
+        }
+        break;
+  }
+  if (value2 == false){
+    // podmínky prozpřesňování časů vysokých rychlostí
+      switch(value){
+    case 1:
+        if(timer > t1 && value3 == 0){
+          st1++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 2:
+        if(timer > t2 && value3 == 0){
+          st2++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 3:
+        if(timer > t3 && value3 == 0){
+          st3++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 4:
+        if(timer > t4 && value3 == 0){
+          st4++;
+          OCR0A = 71;
+          value3 = 2;;
+        }
+        break;
+    case 5:
+        if(timer > t5 && value3 == 0){
+          st5++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 6:
+        if(timer > t6 && value3 == 0){
+          st6++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    case 7:
+        if(timer > t7 && value3 == 0){
+          st7++;
+          OCR0A = 71;
+          value3 = 2;
+        }
+        break;
+    }
+
+  }
+  }
+}
